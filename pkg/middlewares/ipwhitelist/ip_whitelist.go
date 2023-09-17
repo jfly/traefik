@@ -20,10 +20,11 @@ const (
 
 // ipWhiteLister is a middleware that provides Checks of the Requesting IP against a set of Whitelists.
 type ipWhiteLister struct {
-	next        http.Handler
-	whiteLister *ip.Checker
-	strategy    ip.Strategy
-	name        string
+	next             http.Handler
+	whiteLister      *ip.Checker
+	strategy         ip.Strategy
+	name             string
+	rejectStatusCode int
 }
 
 // New builds a new IPWhiteLister given a list of CIDR-Strings to whitelist.
@@ -33,6 +34,12 @@ func New(ctx context.Context, next http.Handler, config dynamic.IPWhiteList, nam
 
 	if len(config.SourceRange) == 0 {
 		return nil, errors.New("sourceRange is empty, IPWhiteLister not created")
+	}
+
+	rejectStatusCode := config.RejectStatusCode
+	// If RejectStatusCode is not given, default to Forbidden (403).
+	if rejectStatusCode == 0 {
+		rejectStatusCode = 403
 	}
 
 	checker, err := ip.NewChecker(config.SourceRange)
@@ -48,10 +55,11 @@ func New(ctx context.Context, next http.Handler, config dynamic.IPWhiteList, nam
 	logger.Debugf("Setting up IPWhiteLister with sourceRange: %s", config.SourceRange)
 
 	return &ipWhiteLister{
-		strategy:    strategy,
-		whiteLister: checker,
-		next:        next,
-		name:        name,
+		strategy:         strategy,
+		whiteLister:      checker,
+		next:             next,
+		name:             name,
+		rejectStatusCode: rejectStatusCode,
 	}, nil
 }
 
@@ -69,7 +77,8 @@ func (wl *ipWhiteLister) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		msg := fmt.Sprintf("Rejecting IP %s: %v", clientIP, err)
 		logger.Debug(msg)
 		tracing.SetErrorWithEvent(req, msg)
-		reject(ctx, rw)
+
+		reject(wl.rejectStatusCode, ctx, rw)
 		return
 	}
 	logger.Debugf("Accepting IP %s", clientIP)
@@ -77,9 +86,7 @@ func (wl *ipWhiteLister) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	wl.next.ServeHTTP(rw, req)
 }
 
-func reject(ctx context.Context, rw http.ResponseWriter) {
-	statusCode := http.StatusForbidden
-
+func reject(statusCode int, ctx context.Context, rw http.ResponseWriter) {
 	rw.WriteHeader(statusCode)
 	_, err := rw.Write([]byte(http.StatusText(statusCode)))
 	if err != nil {
